@@ -65,7 +65,7 @@ class PurePursuitController:
         dist_to_target = math.hypot(lx - robot_x, ly - robot_y)
         kappa = 0.0 if dist_to_target < 0.1 else 2.0 * math.sin(alpha) / dist_to_target
 
-        omega_deg = math.degrees(robot_v * kappa)
+        omega_deg = robot_v * kappa
         omega_deg = max(-self.omega_max, min(self.omega_max, omega_deg))
 
         return omega_deg, lookahead_idx
