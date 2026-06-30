@@ -34,11 +34,6 @@ from shapely.ops import unary_union
 # Mission abort exception
 # ─────────────────────────────────────────────────────────────────────────────
 class MissionAbortError(Exception):
-    """Levée quand un waypoint ou un arc Dubins planifié est invalide
-    (hors stay_inside, dans un obstacle, ou aucune solution Dubins trouvée) —
-    déclenche l'abort immédiat de la mission. Ne pas confondre avec une
-    exception inattendue (bug) : seules ces erreurs métier doivent remonter
-    via cette classe pour être catchées proprement dans _loop_inner."""
     pass
 
 
@@ -181,7 +176,8 @@ class EvoloMovePath:
         sub_cbg = ReentrantCallbackGroup()
 
         self.dubins_path_pub = self._node.create_publisher(Path, 'rviz/planned_path', 10, callback_group=pub_cbg)
-        self.speed_pub       = self._node.create_publisher(TwistStamped, evoloTopics.EVOLO_TWIST_PLANNED, 10, callback_group=pub_cbg)
+        # self.speed_pub       = self._node.create_publisher(TwistStamped, evoloTopics.EVOLO_TWIST_PLANNED, 10, callback_group=pub_cbg)
+        self.speed_pub = self._node.create_publisher(Odometry, evoloTopics.EVOLO_CONTROL_SETPOINT, 10, callback_group=pub_cbg)
         self.robot_sub    = self._node.create_subscription(Odometry, smarcTopics.ODOM_TOPIC, self.robot_odom_callback, 10, callback_group=sub_cbg)
         self.polygons_sub = self._node.create_subscription(GeofencePolygonsStamped, smarcTopics.GEOFENCE_POLYGONS_TOPIC, self._geofence_polygons_callback, 10, callback_group=sub_cbg)
 
@@ -928,6 +924,7 @@ class EvoloMovePath:
 
         v = self.speed_kn
 
+        # control
         omega, _ = self.controller.compute(
             robot_x   = float(robot_pos.x),
             robot_y   = float(robot_pos.y),
@@ -939,15 +936,22 @@ class EvoloMovePath:
         )
 
         MAX_DELTA      = 4.0
-        omega_smoothed = (self._prev_omega
-                          + max(-MAX_DELTA, min(MAX_DELTA, omega - self._prev_omega)))
+        omega_smoothed = self._prev_omega + max(-MAX_DELTA, min(MAX_DELTA, omega - self._prev_omega))
         self._prev_omega = omega_smoothed
 
-        cmd                 = TwistStamped()
-        cmd.header.stamp    = self._node.get_clock().now().to_msg()
-        cmd.header.frame_id = self.frame_id
-        cmd.twist.linear.x  = v
-        cmd.twist.angular.z = omega_smoothed
+        commanded_yaw = self.current_yaw + math.radians(omega_smoothed)
+        q = tf_transformations.quaternion_from_euler(0, 0, commanded_yaw)
+
+        cmd                         = Odometry()
+        cmd.header.stamp            = self._node.get_clock().now().to_msg()
+        cmd.header.frame_id         = self.frame_id
+        cmd.child_frame_id          = "evolo/base_link"
+        cmd.pose.pose.orientation.x = q[0]
+        cmd.pose.pose.orientation.y = q[1]
+        cmd.pose.pose.orientation.z = q[2]
+        cmd.pose.pose.orientation.w = q[3]
+        cmd.twist.twist.linear.x    = v
+        cmd.twist.twist.angular.z   = omega_smoothed
         self.speed_pub.publish(cmd)
 
         return None
