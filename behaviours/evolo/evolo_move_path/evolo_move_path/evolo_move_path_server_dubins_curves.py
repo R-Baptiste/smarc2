@@ -41,13 +41,31 @@ class MissionAbortError(Exception):
 # Pure Pursuit Controller
 # ─────────────────────────────────────────────────────────────────────────────
 class PurePursuitController:
-    def __init__(self, Ld_base, omega_max, dubins_step):
+    def __init__(self, Ld_base, Ld_min, omega_max, dubins_step, min_turning_radius):
         self.Ld_base     = Ld_base
+        self.Ld_min      = Ld_min
         self.omega_max   = omega_max
         self.dubins_step = dubins_step
+        arc_len = min_turning_radius * math.pi / 2
+        self.lookahead_pts = max(3, int(arc_len / dubins_step))
+
+    def _path_curvature_ahead(self, path, cursor):
+        end = min(len(path), cursor + self.lookahead_pts)
+        if end - cursor < 3:
+            return 0.0
+
+        yaws = [path[i][2] for i in range(cursor, end)]
+        total_turn = sum(
+            abs(math.atan2(math.sin(yaws[i+1] - yaws[i]),
+                            math.cos(yaws[i+1] - yaws[i])))
+            for i in range(len(yaws) - 1)
+        )
+
+        return min(1.0, total_turn / (math.pi / 2))
 
     def compute(self, robot_x, robot_y, robot_yaw, robot_v, path, cursor, dt):
-        Ld = self.Ld_base
+        curvature_factor = self._path_curvature_ahead(path, cursor)
+        Ld = self.Ld_base - curvature_factor * (self.Ld_base - self.Ld_min)
 
         lookahead_idx = len(path) - 1
         for i in range(cursor, len(path)):
@@ -57,19 +75,7 @@ class PurePursuitController:
                 break
 
         lx, ly, _ = path[lookahead_idx]
-        angle_to_target = math.atan2(ly - robot_y, lx - robot_x)
-        alpha = math.atan2(
-            math.sin(angle_to_target - robot_yaw),
-            math.cos(angle_to_target - robot_yaw),
-        )
-        dist_to_target = math.hypot(lx - robot_x, ly - robot_y)
-        kappa = 0.0 if dist_to_target < 0.1 else 2.0 * math.sin(alpha) / dist_to_target
-
-        omega_deg = robot_v * kappa
-        omega_deg = max(-self.omega_max, min(self.omega_max, omega_deg))
-
-        return omega_deg, lookahead_idx
-
+        return lx, ly, lookahead_idx
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Action
@@ -91,6 +97,7 @@ class EvoloMovePath:
             ('speed_fast',         rclpy.Parameter.Type.DOUBLE),
             ('omega_max',          rclpy.Parameter.Type.DOUBLE),
             ('ld_base',            rclpy.Parameter.Type.DOUBLE),
+            ('ld_min',            rclpy.Parameter.Type.DOUBLE),
             ('min_turning_radius', rclpy.Parameter.Type.DOUBLE),
             ('dubins_step',        rclpy.Parameter.Type.DOUBLE),
             ('timeout',            rclpy.Parameter.Type.DOUBLE),
@@ -98,13 +105,12 @@ class EvoloMovePath:
             ('dubins_mode',        rclpy.Parameter.Type.STRING),
             ('hard_buffer',        rclpy.Parameter.Type.DOUBLE),
             ('soft_buffer',        rclpy.Parameter.Type.DOUBLE),
-            ('geofence_timeout',   rclpy.Parameter.Type.DOUBLE),
         ])
 
         self.SPEED_SLOW         = self._node.get_parameter('speed_slow').value
         self.SPEED_STANDARD     = self._node.get_parameter('speed_standard').value
         self.SPEED_FAST         = self._node.get_parameter('speed_fast').value
-        self.OMEGA_MAX          = self._node.get_parameter('omega_max').value
+        self.OMEGA_MAX          = math.radians(self._node.get_parameter('omega_max').value)
         self.MIN_TURNING_RADIUS = self._node.get_parameter('min_turning_radius').value
         self.DUBINS_STEP        = self._node.get_parameter('dubins_step').value
         self.DUBINS_MODE        = self._node.get_parameter('dubins_mode').value
@@ -112,12 +118,13 @@ class EvoloMovePath:
         self.frame_id           = self._node.get_parameter('frame_id').value
         self.HARD_BUFFER        = self._node.get_parameter('hard_buffer').value
         self.SOFT_BUFFER        = self._node.get_parameter('soft_buffer').value
-        self.GEOFENCE_TIMEOUT   = self._node.get_parameter('geofence_timeout').value
 
         self.controller = PurePursuitController(
-            Ld_base          = self._node.get_parameter('ld_base').value,
-            omega_max        = self.OMEGA_MAX,
-            dubins_step      = self.DUBINS_STEP
+            Ld_base     = self._node.get_parameter('ld_base').value,
+            Ld_min      = self._node.get_parameter('ld_min').value,
+            omega_max   = self.OMEGA_MAX,
+            dubins_step = self.DUBINS_STEP,
+            min_turning_radius = self.MIN_TURNING_RADIUS
         )
 
         self._as = GentlerActionServer(
@@ -847,24 +854,15 @@ class EvoloMovePath:
                                     or self._allowed_zone is not None)
 
                 if not has_geofence:
-                    elapsed = time_now - self.action_started_time
-                    if elapsed < self.GEOFENCE_TIMEOUT:
-                        if int(elapsed) % 2 == 0:
-                            self._node.get_logger().info(
-                                f'Waiting for geofence… ({elapsed:.1f}s / '
-                                f'{self.GEOFENCE_TIMEOUT}s timeout)')
-                        return None
-                    else:
-                        self._node.get_logger().warn(
-                            f'Geofence timeout ({self.GEOFENCE_TIMEOUT}s) — '
-                            'planning without avoidance')
+                    self._node.get_logger().warn(
+                        'No geofence yet — planning without avoidance')
                 else:
                     if not getattr(self, '_waypoints_filtered', False):
                         self._filter_waypoints()
                         self._waypoints_filtered = True
                         if not self.target_list:
                             raise MissionAbortError(
-                                'Plus aucun waypoint après filtrage')
+                                'No point after filter')
 
                 if not self._plan_global_dubins():
                     return None
@@ -908,8 +906,9 @@ class EvoloMovePath:
             except Exception:
                 pass
 
-
-        if self.path_cursor >= len(path) - 1:
+        dist_to_goal = math.hypot(robot_pos.x - path[-1][0], robot_pos.y - path[-1][1])
+        tolerance = 5
+        if self.path_cursor >= len(path) - 1 and dist_to_goal < tolerance:
             self._node.get_logger().info('End of Dubins path reached')
             self._send_stop()
             return True
@@ -922,10 +921,12 @@ class EvoloMovePath:
         if dist_to_curve < 1.0:
             self._precision_ticks_close += 1
 
+
+
         v = self.speed_kn
 
-        # control
-        omega, _ = self.controller.compute(
+        # control : vise directement le point de lookahead, comme move_to
+        lx, ly, _ = self.controller.compute(
             robot_x   = float(robot_pos.x),
             robot_y   = float(robot_pos.y),
             robot_yaw = float(self.current_yaw),
@@ -935,13 +936,12 @@ class EvoloMovePath:
             dt        = 0.1,
         )
 
-        MAX_DELTA      = 4.0
-        dt = 0.1
-        omega_smoothed = self._prev_omega + max(-MAX_DELTA, min(MAX_DELTA, omega - self._prev_omega))
-        self._prev_omega = omega_smoothed
-
-        commanded_yaw = self.current_yaw + omega_smoothed * dt
+        commanded_yaw = math.atan2(ly - robot_pos.y, lx - robot_pos.x)
         q = tf_transformations.quaternion_from_euler(0, 0, commanded_yaw)
+
+        # angular.z reste utile pour la télémétrie / debug, calculé après coup
+        yaw_diff = math.atan2(math.sin(commanded_yaw - self.current_yaw),
+                               math.cos(commanded_yaw - self.current_yaw))
 
         cmd                         = Odometry()
         cmd.header.stamp            = self._node.get_clock().now().to_msg()
@@ -952,7 +952,7 @@ class EvoloMovePath:
         cmd.pose.pose.orientation.z = q[2]
         cmd.pose.pose.orientation.w = q[3]
         cmd.twist.twist.linear.x    = v
-        cmd.twist.twist.angular.z   = omega_smoothed
+        cmd.twist.twist.angular.z   = yaw_diff  # indicatif seulement, plus utilisé pour intégrer
         self.speed_pub.publish(cmd)
 
         return None
@@ -975,10 +975,13 @@ class EvoloMovePath:
         return best_idx
 
     def _send_stop(self):
-        cmd = TwistStamped()
+        cmd = Odometry()
         cmd.header.stamp    = self._node.get_clock().now().to_msg()
-        cmd.twist.linear.x  = 0.0
-        cmd.twist.angular.z = 0.0
+        cmd.header.frame_id = self.frame_id
+        cmd.child_frame_id  = "evolo/base_link"
+        cmd.pose.pose.orientation.w = 1.0  
+        cmd.twist.twist.linear.x  = 0.0
+        cmd.twist.twist.angular.z = 0.0
         self.speed_pub.publish(cmd)
 
     def _smooth_path_bezier_safe(self, path, n_out=None):

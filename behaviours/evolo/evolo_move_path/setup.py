@@ -36,6 +36,8 @@ setup(
             'move_path_server_dubins_curves_rrt_star = evolo_move_path.evolo_move_path_server_dubins_curves_rrt_star:main',
             'move_path_server_shapely = evolo_move_path.evolo_move_path_server_shapely:main',
             'move_path_server_visibility = evolo_move_path.evolo_move_path_server_visibility:main',
+            'evolo_viz = evolo_move_path.evolo_viz:main',
+            'evolo_geofence_viz = evolo_move_path.evolo_geofence_viz:main',
 
             # Geofence
             'move_path_server_geofence =  evolo_move_path.geofence_checker_evolo:main'
