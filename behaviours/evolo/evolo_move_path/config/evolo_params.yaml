@@ -10,8 +10,8 @@
     omega_max: 30.0
 
     # Pure Pursuit
-    ld_base: 12.0   # en ligne droite, stable
-    ld_min: 7.0     # en virage serré, colle à la courbe (R/4 ≈ 5, on prend un peu moins) 
+    ld_base: 12.0   
+    ld_min: 7.0     
 
     # Dubins planner
     min_turning_radius: 30.0
