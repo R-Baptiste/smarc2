@@ -183,7 +183,6 @@ class EvoloMovePath:
         sub_cbg = ReentrantCallbackGroup()
 
         self.dubins_path_pub = self._node.create_publisher(Path, 'rviz/planned_path', 10, callback_group=pub_cbg)
-        # self.speed_pub       = self._node.create_publisher(TwistStamped, evoloTopics.EVOLO_TWIST_PLANNED, 10, callback_group=pub_cbg)
         self.speed_pub = self._node.create_publisher(Odometry, evoloTopics.EVOLO_CONTROL_SETPOINT, 10, callback_group=pub_cbg)
         self.robot_sub    = self._node.create_subscription(Odometry, smarcTopics.ODOM_TOPIC, self.robot_odom_callback, 10, callback_group=sub_cbg)
         self.polygons_sub = self._node.create_subscription(GeofencePolygonsStamped, smarcTopics.GEOFENCE_POLYGONS_TOPIC, self._geofence_polygons_callback, 10, callback_group=sub_cbg)
@@ -519,12 +518,12 @@ class EvoloMovePath:
         route = self._dijkstra(graph, 0, 1)
         if not route or len(route) < 2:
             raise MissionAbortError(
-                f'Dijkstra: aucun chemin de contournement trouvé entre '
+                f'Dijkstra: no path found '
                 f'({start_xy[0]:.1f},{start_xy[1]:.1f}) et '
                 f'({end_xy[0]:.1f},{end_xy[1]:.1f})')
 
         self._node.get_logger().info(
-            f'[Dijkstra] Route: {len(route)-1} segment(s)')
+            f'[Dijkstra] Path: {len(route)-1} length')
         return [all_nodes[nid] for nid in route[1:]]
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -708,10 +707,10 @@ class EvoloMovePath:
                 'waypoints': waypoints_latlon,
             })
             self._node.get_logger().info(
-                f"[WARAPS] Liste globale envoyée ({len(waypoints_latlon)} pts)"
+                f"[WARAPS] List sent ({len(waypoints_latlon)} pts)"
             )
         except Exception as e:
-            self._node.get_logger().error(f"[WARAPS] Erreur envoi trajectoire globale : {e}")
+            self._node.get_logger().error(f"[WARAPS] Erreor : {e}")
 
         return True
 
@@ -780,13 +779,6 @@ class EvoloMovePath:
         self._waypoints_filtered    = False
 
     def _filter_waypoints(self):
-        """Filtre les waypoints par rapport au geofence.
-
-        Lève MissionAbortError au premier waypoint invalide (hors stay_inside
-        ou dans un obstacle) plutôt que de le retirer silencieusement de la
-        mission — un waypoint que l'opérateur a explicitement demandé et qui
-        s'avère impossible à atteindre doit annuler la mission, pas être ignoré.
-        """
         with self._islands_lock:
             allowed   = self._allowed_zone
             hard_zone = self._hard_union
