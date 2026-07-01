@@ -373,6 +373,32 @@ class EvoloMovePathClient(Node):
         self.viz_pub.publish(ma)
 
     def send_goal(self):
+
+        """
+        self.get_logger().info('Wait for Action Server…')
+        if not self._action_client.wait_for_server(timeout_sec=10.0):
+            self.get_logger().error('No server')
+            return
+        
+        # avant la boucle d'attente
+        probe = GeoPoint()
+        probe.latitude, probe.longitude, probe.altitude = 58.8389422670, 17.6534623045, 0.0
+        zone_frame = georef_utils.convert_latlon_to_utm(probe).header.frame_id  # ex: "utm_33_V"
+
+        self.get_logger().info(f'Waiting for TF frame: {zone_frame}')
+        while not self._tf_buffer.can_transform(
+                self.frame_id, zone_frame, Time(seconds=0)):
+            self.get_logger().info('Waiting for TF…')
+            rclpy.spin_once(self, timeout_sec=0.5)
+        
+        while not self._tf_buffer.can_transform(
+                self.frame_id, 'utm', Time(seconds=0)):
+            self.get_logger().info('Waiting for TF…')
+            rclpy.spin_once(self, timeout_sec=0.5)
+        
+        goal_msg = BaseAction.Goal()
+        """
+
         self.get_logger().info('Wait for Action Server…')
         if not self._action_client.wait_for_server(timeout_sec=10.0):
             self.get_logger().error('No server')

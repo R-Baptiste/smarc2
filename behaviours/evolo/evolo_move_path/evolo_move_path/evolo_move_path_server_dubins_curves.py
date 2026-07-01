@@ -936,10 +936,11 @@ class EvoloMovePath:
         )
 
         MAX_DELTA      = 4.0
+        dt = 0.1
         omega_smoothed = self._prev_omega + max(-MAX_DELTA, min(MAX_DELTA, omega - self._prev_omega))
         self._prev_omega = omega_smoothed
 
-        commanded_yaw = self.current_yaw + math.radians(omega_smoothed)
+        commanded_yaw = self.current_yaw + omega_smoothed * dt
         q = tf_transformations.quaternion_from_euler(0, 0, commanded_yaw)
 
         cmd                         = Odometry()
