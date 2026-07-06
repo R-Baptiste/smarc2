@@ -17,6 +17,27 @@ from smarc_action_base.gentler_action_server import GentlerActionServer
 
 _R_EARTH = 6371000.0
 
+_SPEED_MAP = {'fast': 6.0, 'slow': 4.0, 'standard': 5.0}
+
+
+# ─────────────────────────────────────────────────────────────────────────
+def _parse_speed(node: Node, speed_raw, default: float = 5.0) -> float:
+    if isinstance(speed_raw, str):
+        val = _SPEED_MAP.get(speed_raw.lower())
+        if val is None:
+            node.get_logger().warn(
+                f"[Speed] Unrecognized speed level '{speed_raw}' "
+                f"(expected one of {list(_SPEED_MAP)}) — using default {default} m/s"
+            )
+            return default
+        return val
+    try:
+        return float(speed_raw)
+    except (TypeError, ValueError):
+        node.get_logger().warn(f"[Speed] Invalid speed value {speed_raw!r} — using default {default} m/s")
+        return default
+
+
 # ─────────────────────────────────────────────────────────────────────────
 def _latlon_to_xy(lat, lon, origin_lat, origin_lon):
     dlat = math.radians(lat - origin_lat)
@@ -33,6 +54,23 @@ def _xy_to_latlon(x, y, origin_lat, origin_lon):
 
 # ─────────────────────────────────────────────────────────────────────────
 class SearchArea(Node):
+    """
+    Single-zone boustrophedon coverage planner.
+
+    Goal payload (flat WARAPS behavior-tree convention, no "task" wrapper):
+        {
+          "speed": "low" | "medium" | "high" | "standard" | <float>,
+          "area": [{"latitude":.., "longitude":..}, ...],   # single polygon
+          "obstacle": [
+              [{"latitude":.., "longitude":..}, ...], ...   # optional, unused here yet
+          ]
+        }
+
+    Can be called directly (single zone) or as a sub-goal fanned out by
+    'search_areas' (multi-zone orchestrator) — the payload shape is
+    identical either way.
+    """
+
     def __init__(self):
         super().__init__('search_area')
 
@@ -56,18 +94,15 @@ class SearchArea(Node):
         self._move_path_client = ActionClient(
             self, BaseAction, self.move_path_action, callback_group=cbg)
 
-        # ── Mission state ─────────────────────────────────────────────────────
         self._pending_payload: dict = {}
         self._waypoints_latlon: list = []
         self._speed_mission: float = self.speed
 
-        # ── move_path sub-goal state ──────────────────────────────────────────
         self._mp_goal_future   = None
         self._mp_result_future = None
         self._mp_goal_handle: ClientGoalHandle | None = None
         self._last_feedback: dict = {}
 
-        # ── GentlerActionServer ───────────────────────────────────────────────
         self._server = GentlerActionServer(
             node=self,
             action_name='search_area',
@@ -79,7 +114,7 @@ class SearchArea(Node):
             loop_frequency=5.0,
         )
 
-        self.get_logger().info('SearchArea (no obstacles, convex decomposition) started')
+        self.get_logger().info('SearchArea started')
 
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -105,26 +140,22 @@ class SearchArea(Node):
     def _prepare_loop(self) -> None:
         payload   = self._pending_payload
         area_pts  = payload.get('area', [])
-        self._speed_mission = payload.get('speed', self.speed)
+        speed_raw = payload.get('speed', self.speed)
+        self._speed_mission = _parse_speed(self, speed_raw, default=self.speed)
 
-        # Reset sub-goal state
         self._mp_goal_future   = None
         self._mp_result_future = None
         self._mp_goal_handle   = None
         self._last_feedback    = {}
 
-        # Pre-compute waypoints (pure CPU — fine to do here)
-        inside_latlon = [(p['lat'], p['lon']) for p in area_pts]
+        inside_latlon = [(p['latitude'], p['longitude']) for p in area_pts]
         self._waypoints_latlon = self._generate_coverage(inside_latlon, self.lane_spacing)
 
         if self._waypoints_latlon:
-            self.get_logger().info(
-                f'[SearchArea] Generated {len(self._waypoints_latlon)} waypoints'
-            )
+            self.get_logger().info(f'[SearchArea] Generated {len(self._waypoints_latlon)} waypoints')
         else:
             self.get_logger().error('[SearchArea] No waypoints generated')
 
-        # Check move_path server availability
         if not self._move_path_client.wait_for_server(timeout_sec=5.0):
             self.get_logger().error(f'move_path action server unavailable: {self.move_path_action}')
             self._server_unavailable = True
@@ -150,9 +181,7 @@ class SearchArea(Node):
                     for lat, lon in self._waypoints_latlon
                 ],
             })
-            self.get_logger().info(
-                f'[SearchArea] Sending {len(self._waypoints_latlon)} waypoints to move_path'
-            )
+            self.get_logger().info(f'[SearchArea] Sending {len(self._waypoints_latlon)} waypoints to move_path')
             self._mp_goal_future = self._move_path_client.send_goal_async(
                 goal_msg,
                 feedback_callback=self._feedback_cb,
@@ -184,14 +213,14 @@ class SearchArea(Node):
             self._mp_result_future = None
             self._mp_goal_handle   = None
 
-            if result.status == 4:   # SUCCEEDED
+            if result.status == 4:   
                 self.get_logger().info('[SearchArea] move_path completed successfully')
                 return True
 
             self.get_logger().error(f'[SearchArea] move_path ended with status={result.status}')
             return False
 
-        return None  # fallback
+        return None
 
 
     # ─────────────────────────────────────────────────────────────────────────

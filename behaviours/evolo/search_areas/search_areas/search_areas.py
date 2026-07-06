@@ -8,40 +8,81 @@ from rclpy.action import ActionClient
 from rclpy.action.client import ClientGoalHandle
 
 from smarc_msgs.action import BaseAction
-from smarc_msgs.msg import GeofencePolygonsStamped
 from smarc_utilities import georef_utils
 from geographic_msgs.msg import GeoPoint
 from smarc_msgs.msg import Topics as smarcTopics
 from smarc_action_base.gentler_action_server import GentlerActionServer
 from geometry_msgs.msg import PointStamped
 
+
+_SPEED_MAP = {'fast': 6.0, 'slow': 4.0, 'standard': 5.0}
+
+
+# ─────────────────────────────────────────────────────────────────────────
+def _parse_speed(node: Node, speed_raw, default: float = 5.0) -> float:
+    if isinstance(speed_raw, str):
+        val = _SPEED_MAP.get(speed_raw.lower())
+        if val is None:
+            node.get_logger().warn(
+                f"[Speed] Unrecognized speed level '{speed_raw}' "
+                f"(expected one of {list(_SPEED_MAP)}) — using default {default} m/s"
+            )
+            return default
+        return val
+    try:
+        return float(speed_raw)
+    except (TypeError, ValueError):
+        node.get_logger().warn(
+            f"[Speed] Invalid speed value {speed_raw!r} — using default {default} m/s"
+        )
+        return default
+
+
+# ─────────────────────────────────────────────────────────────────────────
+def _valid_polygons(polygons: list) -> list:
+    return [p for p in polygons if p and len(p) >= 3]
+
+
 # ─────────────────────────────────────────────────────────────────────────
 class SearchAreas(Node):
+    """
+    Multi-zone orchestrator. Fans out one 'search_area' sub-goal per search
+    zone, using the exact same WARAPS payload convention that 'search_area'
+    itself expects — a caller with a single zone can call 'search_area'
+    directly instead of going through this node; a caller with several
+    zones goes through this one.
 
-    _SPEED_MAP = {'high': 10.0, 'medium': 5.0, 'low': 2.0}
+    Goal payload (flat WARAPS behavior-tree convention, no "task" wrapper):
+        {
+          "speed": "low" | "medium" | "high" | "standard" | <float>,
+          "areas": [
+              [{"latitude":.., "longitude":..}, ...],    # zone 1
+              [{"latitude":.., "longitude":..}, ...],    # zone 2, ...
+              ...
+          ]
+        }
+
+    Note the "area" key holds a list of *polygons* here (one per zone) —
+    the same key name as 'search_area' uses for a single polygon (list of
+    points). The nesting level is what distinguishes the two, matching the
+    real BT payload format.
+    """
 
     def __init__(self):
         super().__init__('search_areas')
 
         cbg = ReentrantCallbackGroup()
 
-        self._obstacles_latlon: list[list[dict]] = []
-        self._geofence_received: bool = False
-
-        self._geofence_sub = self.create_subscription(GeofencePolygonsStamped, smarcTopics.GEOFENCE_POLYGONS_TOPIC, self._geofence_cb, 10, callback_group=cbg,)
 
         self._search_area_client = ActionClient(self, BaseAction, 'search_area', callback_group=cbg,)
 
-        # ── Mission state (populated in on_goal_received / prepare_loop) ──────
-        self._areas: list = []
+        self._areas: list = []          
         self._speed: float = 5.0
-        self._obstacles_snapshot: list[list[dict]] = []
 
-        # Per-iteration state (managed inside loop_inner)
         self._current_area_index: int = 0
         self._current_goal_handle: ClientGoalHandle | None = None
-        self._area_future = None          
-        self._result_future = None        
+        self._area_future = None
+        self._result_future = None
         self._last_feedback: dict = {}
 
         # ── GentlerActionServer ───────────────────────────────────────────────
@@ -61,86 +102,12 @@ class SearchAreas(Node):
             f'Waiting for goals on: {self.get_namespace()}/search_areas'
         )
 
-
-    # ─────────────────────────────────────────────────────────────────────────
-    def _geofence_cb(self, msg: GeofencePolygonsStamped):
-        obstacles: list[list[dict]] = []
-
-        for poly in msg.islands:
-            pts: list[dict] = []
-            for pt in poly.points:
-                try:
-                    pt_stamped = PointStamped()
-                    pt_stamped.header.frame_id = "utm_33_V"
-                    pt_stamped.header.stamp = msg.header.stamp 
-
-                    pt_stamped.point.x = float(pt.x)
-                    pt_stamped.point.y = float(pt.y)
-                    pt_stamped.point.z = float(pt.z)
-
-                    gp: GeoPoint = georef_utils.convert_utm_to_latlon(pt_stamped)
-                    
-                    pts.append({'lat': gp.latitude, 'lon': gp.longitude})
-                except Exception as e:
-                    self.get_logger().warn(
-                        f'[Geofence] Could not convert point {pt}: {e}'
-                    )
-
-            if len(pts) >= 3:
-                obstacles.append(pts)
-            else:
-                self.get_logger().warn(
-                    '[Geofence] Dropped island polygon with < 3 valid points'
-                )
-
-        self._obstacles_latlon = obstacles
-        self._geofence_received = True
-        self.get_logger().info(
-            f'[Geofence] Updated: {len(obstacles)} obstacle(s) cached'
-        )
-
-
-    # ─────────────────────────────────────────────────────────────────────────
-    def _resolve_obstacles(self, payload: dict) -> list[list[dict]]:
-        if self._geofence_received:
-            self.get_logger().info(
-                f'[Obstacles] Using {len(self._obstacles_latlon)} '
-                'obstacle(s) from /smarc/geofence_polygons'
-            )
-            return list(self._obstacles_latlon)
-
-        polygones = payload.get('polygones', [])
-        obstacles = [
-            [{'lat': pt['lat'], 'lon': pt['lon']} for pt in poly['points']]
-            for poly in polygones
-            if not poly.get('stay_inside', True)
-            and len(poly.get('points', [])) >= 3
-        ]
-
-        if obstacles:
-            self.get_logger().warn(
-                f'[Obstacles] No geofence topic received — '
-                f'using {len(obstacles)} obstacle(s) from JSON payload'
-            )
-        else:
-            self.get_logger().warn(
-                '[Obstacles] No geofence topic and no polygones in payload — '
-                'proceeding with zero obstacles'
-            )
-        return obstacles
-
-
     # ─────────────────────────────────────────────────────────────────────────
     def _on_goal_received(self, payload: dict) -> bool:
-        try:
-            params = payload['task']['params']
-            areas  = params['areas']
-        except (KeyError, TypeError) as e:
-            self.get_logger().error(f'[Goal] Missing task/params/areas: {e}')
-            return False
+        areas = _valid_polygons(payload.get('areas', []))
 
         if not areas:
-            self.get_logger().error('[Goal] Empty areas list')
+            self.get_logger().error('[Goal] No valid area polygon (>=3 points) found under "area"')
             return False
 
         self._pending_payload = payload
@@ -161,16 +128,11 @@ class SearchAreas(Node):
     def _prepare_loop(self) -> None:
         """Called once before loop_inner starts. Parse payload, reset state."""
         payload   = self._pending_payload
-        params    = payload['task']['params']
-        speed_raw = params.get('speed', 'low')
+        speed_raw = payload.get('speed', 'low')
 
-        self._areas = params['areas']
-        self._speed = (
-            self._SPEED_MAP.get(speed_raw.lower(), 5.0)
-            if isinstance(speed_raw, str)
-            else float(speed_raw)
-        )
-        self._obstacles_snapshot = self._resolve_obstacles(payload)
+        self._areas = _valid_polygons(payload.get('areas', []))
+        self._speed = _parse_speed(self, speed_raw, default=5.0)
+
 
         self._current_area_index = 0
         self._current_goal_handle = None
@@ -178,20 +140,9 @@ class SearchAreas(Node):
         self._result_future = None
         self._last_feedback = {}
 
-        valid = []
-        for i, pts in enumerate(self._areas):
-            if pts and len(pts) >= 3:
-                valid.append(pts)
-            else:
-                self.get_logger().warn(
-                    f'[SearchAreas] Area {i + 1} has < 3 points — skipping'
-                )
-        self._areas = valid
-
         self.get_logger().info(
             f'[SearchAreas] Mission ready: {len(self._areas)} area(s) | '
-            f'speed={self._speed} | {len(self._obstacles_snapshot)} obstacle(s)'
-        )
+            f'speed={self._speed}')
 
         if not self._search_area_client.wait_for_server(timeout_sec=10.0):
             self.get_logger().error('search_area action server unavailable')
@@ -215,21 +166,16 @@ class SearchAreas(Node):
 
         # ── Phase 1: send the goal (once) ─────────────────────────────────────
         if self._area_future is None and self._result_future is None:
-            area_latlon = [
-                {'lat': pt['latitude'], 'lon': pt['longitude']}
-                for pt in area_pts
-            ]
             zone_payload = {
-                'speed':     self._speed,
-                'area':      area_latlon,
-                'obstacles': self._obstacles_snapshot,
+                'speed':    self._speed,
+                'area':     area_pts
             }
             goal_msg           = BaseAction.Goal()
             goal_msg.goal.data = json.dumps(zone_payload)
 
             self.get_logger().info(
                 f'[SearchAreas] Sending {zone_name} to search_area '
-                f'({len(area_latlon)} pts, {len(self._obstacles_snapshot)} obstacle(s))'
+                f'({len(area_pts)} pts'
             )
             self._area_future = self._search_area_client.send_goal_async(
                 goal_msg,
@@ -279,7 +225,7 @@ class SearchAreas(Node):
                 )
                 return False
 
-        return None  # fallback
+        return None 
 
 
     # ─────────────────────────────────────────────────────────────────────────
