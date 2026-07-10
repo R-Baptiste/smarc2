@@ -149,9 +149,31 @@ class ProxOpsBT:
             "loiter_patrol": {},
         }
 
-    def _parse_goal_request(self, goal_request: dict) -> dict:
+    def _unwrap_goal_request(self, goal_request: dict) -> dict:
         if not isinstance(goal_request, dict):
             raise ValueError("prox-ops goal must be a JSON object")
+
+        if "json-params" not in goal_request:
+            return goal_request
+
+        params = goal_request["json-params"]
+        if isinstance(params, str):
+            try:
+                params = json.loads(params)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    "prox-ops goal json-params must contain valid JSON"
+                ) from exc
+
+        if not isinstance(params, dict):
+            raise ValueError(
+                "prox-ops goal json-params must be a JSON object or encoded JSON object"
+            )
+
+        return params
+
+    def _parse_goal_request(self, goal_request: dict) -> dict:
+        goal_request = self._unwrap_goal_request(goal_request)
 
         provided_sections = set(goal_request.keys())
         missing_sections = self.REQUIRED_GOAL_SECTIONS - provided_sections
@@ -203,9 +225,6 @@ class ProxOpsBT:
         self.log("Sending backend RESET/START from prox_ops_bt prepare_loop.")
         self._publish_backend_command("RESET", "prox_ops_bt started")
         self._publish_backend_command("START", "prox_ops_bt started")
-        
-        # Start patrol timer/counter.
-        self._patrol_started_time_s = self._now_s
 
     @property
     def _status_str(self) -> str:
@@ -233,9 +252,9 @@ class ProxOpsBT:
             return True
 
         root_status = self._bt.root.status
-        # FIXME: Will this fail prematurely? Should it only be a failure
-        # if the patrol timeout is reached?
-        if root_status == Status.FAILURE or not self._patrol_timeout_not_exceeded():
+        patrol_timed_out = (self._patrol_started_time_s is not None
+                            and not self._patrol_timeout_not_exceeded())
+        if root_status == Status.FAILURE or patrol_timed_out:
             self.log("We have failed to prox-ops.")
             self._reset_states()
             return False

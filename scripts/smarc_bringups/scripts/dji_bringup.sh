@@ -87,6 +87,7 @@ elif [[ $ROBOT_NAME == "FC30" ]]; then
     MIN_ALTITUDE_ABOVE_WATER="3.0"
 fi
 AUV_BUOY_LINE_LENGTH=5.0
+HOOK_LINE_LENGTH=10.0
 # fake-sam measurements
 AUV_LENGTH_M=1.3
 AUV_WIDTH_M=0.16
@@ -115,7 +116,9 @@ CAPTAIN_CMD="ros2 launch dji_captain alars_captain.launch \
     use_sim_time:=$USE_SIM_TIME \
     home_altitude_above_water:=$HOME_ABOVE_WATER \
     max_load_kg:=$MAX_LOAD_KG \
-    min_altitude_above_water:=$MIN_ALTITUDE_ABOVE_WATER"
+    min_altitude_above_water:=$MIN_ALTITUDE_ABOVE_WATER \
+    rope_length:=$HOOK_LINE_LENGTH"
+    
 CAPTAIN_STATUS_CMD="ros2 topic echo /$ROBOT_NAME/captain_status std_msgs/msg/String --field data"
 WRAPPER_CMD="ros2 launch psdk_wrapper wrapper.launch.py namespace:=/$ROBOT_NAME/wrapper"
 # DISCOVERY_SERVER_CMD="fast-discovery-server -i 0"
@@ -189,7 +192,8 @@ ALARS_MOVE_TO_CMD="ros2 run alars alars_move_to_action_server --ros-args -r __ns
 -p robot_name:=$ROBOT_NAME \
 -p use_sim_time:=$USE_SIM_TIME"
 
-tmux_make_layout "$SESSION" ALARSActions "
+
+tmux_make_layout "$SESSION" MovingActions "
 col(
     var(ALARS_SEARCH_CMD),
     var(ALARS_FOLLOW_AUV_CMD),
@@ -209,7 +213,6 @@ bt_health_timeout:=5.0 \
 task_liveliness_timeout:=$WASP_BT_TASK_LIVELINESS_TIMEOUT"
 
 
-
 ALARS_BT_CMD="ros2 run alars alars_bt --ros-args -r __ns:=/$ROBOT_NAME \
 -p robot_name:=$ROBOT_NAME \
 -p use_sim_time:=$USE_SIM_TIME \
@@ -218,7 +221,29 @@ ALARS_BT_CMD="ros2 run alars alars_bt --ros-args -r __ns:=/$ROBOT_NAME \
 
 ALARS_BT_STATUS_CMD="ros2 topic echo ${ROBOT_NAME}/alars_bt/status std_msgs/msg/String --field data"
 
-tmux_make_layout "$SESSION" BTs "row(3:var(WASP_BT_CMD), 3:var(ALARS_BT_CMD), 1:var(ALARS_BT_STATUS_CMD))"
+ALARS_PING_SEARCH_CMD="ros2 run alars alars_ping_search_action_server --ros-args -r __ns:=/$ROBOT_NAME \
+-p robot_name:=$ROBOT_NAME \
+-p use_sim_time:=$USE_SIM_TIME"
+
+SUCCOR_CMD="ros2 run serial_ping_pkg modem_ping_estimator_node --ros-args \
+-r __ns:=/$ROBOT_NAME \
+-p use_sim_time:=$USE_SIM_TIME \
+-p serial.port:=/dev/succorfish \
+-p serial.baudrate:=9600 \
+-p topics.own_latlon_topic:=/${ROBOT_NAME}/smarc/latlon \
+-p topics.own_depth_topic:=/${ROBOT_NAME}/sensor/hook_depth \
+-p teensy.own_modem_id:=\\'222\\' \
+-p topics.geopoint_topic:=/${ROBOT_NAME}/sensor/succorfish_geopoint \
+-p topics.marker_topic:=/${ROBOT_NAME}/rviz/succorfish_marker \
+-p topics.map_frame:=${ROBOT_NAME}/map"
+# TODO these would better live in a py launchfile...
+
+tmux_make_layout "$SESSION" BTs "
+row(
+    var(WASP_BT_CMD), 
+    col(3:var(ALARS_BT_CMD), 1:var(ALARS_BT_STATUS_CMD)), 
+    col(3:var(ALARS_PING_SEARCH_CMD), 1:var(SUCCOR_CMD))
+)"
 
 
 ############
@@ -229,33 +254,47 @@ if [[ "$NO_CAM" == "True" ]]; then
     PROJECTION_CMD="echo 'Camera disabled, not launching projection node'"
 else
     YOLO_DEVICE=0
+    YOLO_THRESHOLD=0.5
+    YOLO_ENABLE=True
+    
     CAM_CALIBRATION_FILE="z1_720p_cam_params.yaml"
     YOLO_MODEL="yolo_model_2cls_may.pt" # Options: alars_labeling_training/trained_models
+    OBJECT_CONFIG_FILE="object_estimation.yaml" # Config file to edit each object's parameters for the EKF 
+    MARKERS_VISUALIZATION_ENABLE=True # Only used for debugging, since we cannot visualize new custom array for the poses in RViz
+    
     if [[ $USE_SIM_TIME = "True" ]]; then
         YOLO_DEVICE=cpu
         CAM_CALIBRATION_FILE="sim_1080p_cam_params.yaml"
         # seems to be doing better in sim
         YOLO_MODEL="yolo_model_2cls_mixed.pt"
     fi
-    YOLO_CMD="ros2 launch alars_auv_perception alars_yolo_detector.launch.py \
-    robot_name:=$ROBOT_NAME \
-    device:=$YOLO_DEVICE \
-    use_sim_time:=$USE_SIM_TIME \
-    model_package:=alars_labeling_training \
-    model_file:=$YOLO_MODEL"
 
-    PROJECTION_CMD="ros2 launch auv_state_estimation auv_buoy_ekf_launch.py \
+    YOLO_CMD="ros2 launch yolo_smarc_actions alars_yolo_corners.launch.py \
+    robot_name:=$ROBOT_NAME \
+    model_package:=alars_labeling_training \
+    model_subdir:=trained_models \
+    model_file:=$YOLO_MODEL \
+    namespace:=$ROBOT_NAME/yolo \
+    device:=$YOLO_DEVICE \
+    threshold:=$YOLO_THRESHOLD \
+    enable:=$YOLO_ENABLE
+    "
+
+    PROJECTION_CMD="ros2 launch auv_state_estimation multi_ekf_launch.py \
     robot_name:=$ROBOT_NAME \
     use_sim_time:=$USE_SIM_TIME \
     camera_calibration_file:=$CAM_CALIBRATION_FILE \
-    auv_ekf_staleness_seconds:=$EKF_STALENESS_SECONDS \
-    buoy_ekf_staleness_seconds:=10.0 \
-    auv_length_m:=$AUV_LENGTH_M \
-    auv_width_m:=$AUV_WIDTH_M
+    object_config_file:=$OBJECT_CONFIG_FILE \
+    visualization_enable:=$MARKERS_VISUALIZATION_ENABLE
     "
 fi
 
-tmux_make_layout "$SESSION" CamProc "row(var(YOLO_CMD), var(PROJECTION_CMD))"
+tmux_make_layout "$SESSION" CamProc "
+row(
+    var(YOLO_CMD), 
+    var(PROJECTION_CMD)
+    
+)"
 
 
 ############

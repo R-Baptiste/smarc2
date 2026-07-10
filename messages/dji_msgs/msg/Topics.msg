@@ -2,7 +2,9 @@
 # Usually under /M350
 
 # moving around
-string MOVE_TO_SETPOINT_TOPIC = 'move_to_setpoint' # PoseStamped
+string MOVE_TO_SETPOINT_TOPIC = 'move_base' # PoseStamped
+string VELOCITY_SETPOINT_TOPIC = 'cmd_vel' # TwistStamped
+
 string LABELED_UTM_TOPIC = 'labeled_utm_topic' # String, formatted: "utm_{zone}_{band}"
 string BASE_LINK_IN_MAP_TOPIC = 'base_link_in_map' # PoseStamped with header.frame_id == /robot_name/map
 
@@ -17,6 +19,8 @@ string FISHEYE_CAMERA_INFO_TOPIC = 'fisheye_camera/camera/camera_info' #CameraIn
 # sensors that are not coming from PSDK
 string LOAD_CELL_RAW_TOPIC = 'sensor/load_cell_raw' # Int32
 string LOAD_CELL_WEIGHT_TOPIC = 'sensor/load_cell_weight' # Float32
+string HOOK_DEPTH_TOPIC = 'sensor/hook_depth' # Float32
+string SUCCOR_ESTIMATE_TOPIC = 'sensor/succorfish_geopoint' #GeoPointStamped
 
 
 # propeller rpms all Float32, corresponds to esc_data[0..3] in this order
@@ -61,4 +65,10 @@ string PROJECTED_BUOY_POSE_WITH_COV_TOPIC = 'alars_projection/buoy_pose_with_cov
 string ENABLE_ALARS_DETECTOR_SERVICE_TOPIC = 'enable_alars_detector' # Trigger
 string DISABLE_ALARS_DETECTOR_SERVICE_TOPIC = 'disable_alars_detector' # Trigger
 
+# Multi-object estimation outputs.
+string PROJECTED_OBJECT_POSES_ARRAY_TOPIC = 'alars_projection/object_poses_array' # dji_msgs/ObjectPoseWithCovarianceArray
+string OBJECT_EKF_STATUS_ARRAY_TOPIC = 'alars_ekf/status_array' # dji_msgs/ObjectEkfStatusArray
+string OBJECT_EKF_RESET_SERVICE = 'alars_ekf/reset' # dji_msgs/ResetObjectEkf
 
+# Only for visualization
+string OBJECT_EKF_MARKERS_TOPIC = 'alars_projection/object_pose_markers' # visualization_msgs/MarkerArray

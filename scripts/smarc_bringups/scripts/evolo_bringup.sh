@@ -41,7 +41,7 @@ LIDAR_DRIVER=False
 CAMERA_DRIVER=False
 YOLO_DRIVER=False
 CAMERA_GIMBALL_DRIVER=False
-CAMERA_MQTT_CONTORL=False
+CAMERA_MQTT=False
 CAMERA_STREAM=FAlse
 SIDESCAN_DRIVER=False
 SIMULATOR_DRIVER=False
@@ -57,7 +57,6 @@ VIDERO_STREAM=False
 TOPIC_TRANSPORT=False
 ROSBOARD=False
 JSON_TRANSLATOR=False
-TWIST_VIZ=False
 UW_COM=False
 
 # ---- EXPERIMENTAL ----
@@ -81,7 +80,7 @@ if [ "$MODE" == "SIM" ]; then
     LIDAR_DRIVER=False
     CAMERA_DRIVER=False
     CAMERA_GIMBALL_DRIVER=False
-    CAMERA_MQTT_CONTORL=False
+    CAMERA_MQTT=False
     CAMERA_STREAM=FAlse
     SIDESCAN_DRIVER=False
     SIMULATOR_DRIVER=True
@@ -97,7 +96,6 @@ if [ "$MODE" == "SIM" ]; then
     TOPIC_TRANSPORT=False
     ROSBOARD=False
     JSON_TRANSLATOR=False
-    TWIST_VIZ=True
     UW_COM=False
 fi
 
@@ -115,7 +113,7 @@ if [ "$MODE" == "REAL" ]; then
     CAMERA_DRIVER=True
     YOLO_DRIVER=True
     CAMERA_GIMBALL_DRIVER=True
-    CAMERA_MQTT_CONTORL=True
+    CAMERA_MQTT=True
     CAMERA_STREAM=True
     SIDESCAN_DRIVER=True
     SIMULATOR_DRIVER=False
@@ -131,7 +129,6 @@ if [ "$MODE" == "REAL" ]; then
     TOPIC_TRANSPORT=True
     ROSBOARD=True
     JSON_TRANSLATOR=True
-    TWIST_VIZ=True
     UW_COM=True
 
 fi
@@ -156,7 +153,7 @@ tmux select-window -t $SESSION:0
 tmux send-keys "Remember to start the logging!" 
 
 # Controllers
-CONTROLLER_CMD="ros2 launch evolo_controllers evolo_controllers_launch.py closed_loop_p_gain:=0.5 closed_loop_i_gain:=0.0 closed_loop_d_gain:=0.0 max_steering_output:=40.0"
+CONTROLLER_CMD="ros2 launch evolo_controllers evolo_controllers_launch.py closed_loop_p_gain:=2.0 closed_loop_i_gain:=0.0 closed_loop_d_gain:=0.75 max_steering_output:=40.0"
 tmux_make_layout "$SESSION" Controllers "
 col(
     var(CONTROLLER_CMD)
@@ -207,11 +204,20 @@ row(
 )"
 
 # Health monitoring
+# HEALTH_MONITORING_CMD="ros2 run evolo_health_checker evolo_health_checker --ros-args -r __ns:=/evolo"
 HEALTH_MONITORING_CMD="ros2 topic pub -r 1 /$ROBOT_NAME/smarc/vehicle_health std_msgs/msg/Int8 '{data: 0}' "
 tmux_make_layout "$SESSION" Health-monitoring "
 col(
     var(HEALTH_MONITORING_CMD)
 )"
+
+# Jetson stats publishing
+JETSTAT_CMD="ros2 run ros2_jetson_stats ros2_jtop"
+tmux_make_layout "$SESSION" Jetson-Stats "
+col(
+    var(JETSTAT_CMD)
+)"
+
 
 # WARA-PS bridge
 WARA_PS_MQTT_CMD="sleep 7; ros2 launch str_json_mqtt_bridge waraps_bridge.launch broker_addr:=20.240.40.232 broker_port:=1884 robot_name:=$ROBOT_NAME domain:=$AGENT_TYPE realsim:=$REALSIM use_sim_time:=$USE_SIM_TIME context:=$CONTEXT"
@@ -234,7 +240,8 @@ col(
 
 #Obstacle avoidance
 if [ $OBSTACLE_AVOIDANCE == "True" ]; then
-    OBSTACLE_AVOIDANCE_CMD="ros2 launch evolo_obstacle_avoidance evolo_obstacle_avoidance_launch.py"
+    #OBSTACLE_AVOIDANCE_CMD="ros2 run topic_tools relay /evolo/ctrl/twist_planned /evolo/ctrl/twist_setpoint"
+    OBSTACLE_AVOIDANCE_CMD="ros2 run evolo_obstacle_avoidance_simple_cpp evolo_obstacle_avoidance_cpp --ros-args -r __ns:=/evolo"
     CLUSTERING_CMD="ros2 launch evolo_map_cluster evolo_map_cluster_launch.py"
     tmux_make_layout "$SESSION" Obstacle-avoidance "
     col(
@@ -242,7 +249,8 @@ if [ $OBSTACLE_AVOIDANCE == "True" ]; then
         var(CLUSTERING_CMD)
     )"
 else
-    OBSTACLE_AVOIDANCE_CMD="ros2 run topic_tools relay /evolo/ctrl/twist_planned /evolo/ctrl/twist_setpoint"
+    #OBSTACLE_AVOIDANCE_CMD="ros2 run topic_tools relay /evolo/ctrl/twist_planned /evolo/ctrl/twist_setpoint"
+    OBSTACLE_AVOIDANCE_CMD="ros2 run evolo_obstacle_avoidance_simple_cpp evolo_obstacle_avoidance_cpp --ros-args -r __ns:=/evolo"
     tmux_make_layout "$SESSION" Obstacle-avoidance "
     col(
         var(OBSTACLE_AVOIDANCE_CMD)
@@ -256,17 +264,21 @@ fi
 #Connection to evolo captain
 if [ $CAPTAIN_DRIVER == "Serial" ]; then
     CAPTAIN_DRIVER_CMD="ros2 launch evolo_serial_bridge evolo_serial_launch.py"
+    GPSRELAY_CMD="ros2 run evolo_captain_interface gps_relay"
     tmux_make_layout "$SESSION" Evolo-captain "
     col(
-        var(CAPTAIN_DRIVER_CMD)
+        var(CAPTAIN_DRIVER_CMD),
+        var(GPSRELAY_CMD)
     )"
 fi
 
 if [ $CAPTAIN_DRIVER == "MQTT" ]; then
     CAPTAIN_DRIVER_CMD="ros2 launch evolo_mqtt_bridge evolo_mqtt_launch.py"
+    GPSRELAY_CMD="ros2 run evolo_captain_interface gps_relay"
     tmux_make_layout "$SESSION" Evolo-captain "
     col(
-        var(CAPTAIN_DRIVER_CMD)
+        var(CAPTAIN_DRIVER_CMD),
+        var(GPSRELAY_CMD)
     )"
 fi
 #else None
@@ -319,7 +331,7 @@ fi
 
 #Yolo
 if [ $YOLO_DRIVER == "True" ]; then
-    YOLO_PYTHONPATH="/home/evolo/yolov-env/lib/python3.10/site-packages:/home/evolo/yolov-env/local/lib/python3.10/dist-packages:/home/evolo/yolov-env/lib/python3/dist-packages:/home/evolo/yolov-env/lib/python3.10/dist-packages"
+    YOLO_PYTHONPATH="/home/evolo/yolov-env/lib/python3.10/site-packages"
     YOLO_CMD="export PYTHONPATH=$YOLO_PYTHONPATH:\$PYTHONPATH && \
         ros2 launch yolo_bringup yolo.launch.py \
         model_type:=YOLOE \
@@ -328,6 +340,7 @@ if [ $YOLO_DRIVER == "True" ]; then
         image_reliability:=2 \
         device:=cuda:0 \
         use_tracking:=True \
+        tracker:=botsort.yaml \
         use_debug:=True"
     YOLO_ACTION_CMD="ros2 launch yolo_smarc_actions smarc_yolo_action_launch.py robot_name:=evolo"
     tmux_make_layout "$SESSION" YOLO "
@@ -349,9 +362,9 @@ if [ $CAMERA_GIMBALL_DRIVER == "True" ]; then
         robot_name:=\"$ROBOT_NAME\" \
         use_sim_time:=$USE_SIM_TIME"
     GIMBAL_CAM_ACTION_CLIENT_CMD="ros2 launch evolo_gimbal_remote_control gimbal_remote_control.launch.py robot_name:=evolo"
-    GIMBAL_JSON_FEEDBACK_CMD="ros2 run evolo_gimbal_remote_control gimbal_json_publisher.py"
+    JSON_FEEDBACK_CMD="ros2 launch evolo_gimbal_remote_control json_publishers.launch.py robot_name:=evolo"
 
-    if [ $CAMERA_MQTT_CONTORL == "True" ]; then
+    if [ $CAMERA_MQTT == "True" ]; then
         tmux_make_layout "$SESSION" Gimbal-driver "
         col(
             row(
@@ -360,7 +373,7 @@ if [ $CAMERA_GIMBALL_DRIVER == "True" ]; then
             ),
             row(
                 var(GIMBAL_CAM_ACTION_CLIENT_CMD),
-                var(GIMBAL_JSON_FEEDBACK_CMD)
+                var(JSON_FEEDBACK_CMD)
             )
         )" 
     else
@@ -451,15 +464,6 @@ if [ $ROSBOARD == "True" ]; then
     )"
 fi
 
-if [ $TWIST_VIZ == "True" ]; then
-    TWIST_TO_PATH_PLANNED_CMD="sleep 10; ros2 launch twist_to_path twist_to_path_launch.py subscribe_topic:=/evolo/ctrl/twist_planned publish_topic:=/evolo/rviz/twist_planned_path integration_time:=15.0 integration_dt:=0.5"
-    TWIST_TO_PATH_SETPOINT_CMD="sleep 10; ros2 launch twist_to_path twist_to_path_launch.py subscribe_topic:=/evolo/ctrl/twist_setpoint publish_topic:=/evolo/rviz/twist_setpoint_path integration_time:=15.0 integration_dt:=0.5"
-    tmux_make_layout "$SESSION" twist-visualization "
-    col(
-        var(TWIST_TO_PATH_PLANNED_CMD),
-        var(TWIST_TO_PATH_SETPOINT_CMD)
-    )"
-fi
 
 ########################################################################
 ########################## Communiation ################################

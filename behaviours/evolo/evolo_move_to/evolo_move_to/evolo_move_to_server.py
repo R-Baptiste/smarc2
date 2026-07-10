@@ -20,7 +20,7 @@ from nav_msgs.srv import GetPlan
 from nav_msgs.msg import Path
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Pose, Twist
-from geometry_msgs.msg import PoseStamped, TwistStamped
+from geometry_msgs.msg import PoseStamped, PointStamped
 from std_msgs.msg import Float32, Empty
 from std_msgs.msg import String
 from evolo_msgs.msg import Topics as evoloTopics
@@ -137,8 +137,8 @@ class EvoloMoveTo():
         self.subscriber_callback_group = ReentrantCallbackGroup()
 
         # Publishers
-        # FIXME: this is hacky, should be EVOLO_CONTROL_PLANNED instead.
-        self.evolo_pub = self._node.create_publisher(Odometry, evoloTopics.EVOLO_CONTROL_SETPOINT, 10, callback_group=self.publisher_callback_group)
+        self.evolo_pub = self._node.create_publisher(Odometry, evoloTopics.EVOLO_CONTROL_PLANNED, 10, callback_group=self.publisher_callback_group)
+        self.target_pub = self._node.create_publisher(PointStamped, evoloTopics.EVOLO_CURRENT_WP, 10, callback_group=self.publisher_callback_group)
         # Subscribers
         self.robot_sub = self._node.create_subscription(Odometry, smarcTopics.ODOM_TOPIC, self.robot_odom_callback,10, callback_group=self.subscriber_callback_group)
         self._node.get_logger().info("Action server started")
@@ -156,10 +156,9 @@ class EvoloMoveTo():
             speed = float(speed)
         except Exception as e:
             self._node.get_logger().info(f"Tried to parse speed as float. Did not work: {speed}, {e}")
-            if(speed == "fly"): speed = 6.0
-            elif(speed == "standard"): speed = 6.0
-            elif(speed == "float"): speed = 2.0
-            elif(speed == "stop"): speed = 0.0
+            if(speed == "slow"): speed = 2.0
+            elif(speed == "standard"): speed = 4.9
+            elif(speed == "fast"): speed = 6
             else: speed = 0.0
 
         assert type(speed) == float
@@ -206,6 +205,7 @@ class EvoloMoveTo():
             self._node.get_logger().error("ERROR no robot position")
             return False
 
+        #Calculate distance to our target and return true (success) if we are close to it
         self.distance_to_target = self.calculate_distance(self.robot_position, self.target_position)
         if(self.distance_to_target < self.target_tol):
             #TODO send speed = Stop
@@ -226,6 +226,12 @@ class EvoloMoveTo():
         control_msg.pose.pose.orientation.w = target_quaternion[0]
         control_msg.twist.twist.linear.x  = self.target_speed
         self.evolo_pub.publish(control_msg)
+
+        #Publish current waypoint
+        target_point = PointStamped()
+        target_point.header = self.target_position.header
+        target_point.point = self.target_position.pose.position 
+        self.target_pub.publish(target_point)
 
         return None
     
