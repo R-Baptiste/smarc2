@@ -168,14 +168,14 @@ class EvoloMovePath:
         self._soft_union             = None
         self._shapely_hard_zones     = []
         self._shapely_soft_zones     = []
-        self._allowed_zone           = None   # eroded by HARD_BUFFER (used for planning)
-        self._allowed_zone_raw       = None   # raw polygon (used only for visualization)
+        self._allowed_zone           = None   
+        self._allowed_zone_raw       = None   
         self._contours_hard          = []
         self._contours_soft          = []
-        self._contours_allowed       = []     # contours of the eroded zone
-        self._contours_allowed_raw   = []     # contours of the raw zone
-        self._contours_allowed_hard = []   # raw eroded by HARD_BUFFER
-        self._contours_allowed_soft = []   # raw eroded by SOFT_BUFFER
+        self._contours_allowed       = []     
+        self._contours_allowed_raw   = []     
+        self._contours_allowed_hard = []   
+        self._contours_allowed_soft = []   
         self._geofence_received_time = None
         self._visibility_graph_data  = None
 
@@ -183,26 +183,21 @@ class EvoloMovePath:
         sub_cbg = ReentrantCallbackGroup()
 
         self.dubins_path_pub = self._node.create_publisher(Path, 'rviz/planned_path', 10, callback_group=pub_cbg)
-        # self.speed_pub       = self._node.create_publisher(TwistStamped, evoloTopics.EVOLO_TWIST_PLANNED, 10, callback_group=pub_cbg)
-        self.speed_pub = self._node.create_publisher(Odometry, evoloTopics.EVOLO_CONTROL_SETPOINT, 10, callback_group=pub_cbg)
+        self.speed_pub = self._node.create_publisher(Odometry, evoloTopics.EVOLO_CONTROL_PLANNED, 10, callback_group=pub_cbg)
         self.robot_sub    = self._node.create_subscription(Odometry, smarcTopics.ODOM_TOPIC, self.robot_odom_callback, 10, callback_group=sub_cbg)
         self.polygons_sub = self._node.create_subscription(GeofencePolygonsStamped, smarcTopics.GEOFENCE_POLYGONS_TOPIC, self._geofence_polygons_callback, 10, callback_group=sub_cbg)
-
-        # ── Publisher WARAPS feedback (remplace MQTT) ─────────────────────────
-        # Publie sur le même topic ROS 2 que WaraPSTaskHandler.publish_feedback_to_current_task()
         self._waraps_feedback_pub = self._node.create_publisher(String, 'waraps/current_waypoint', 10, callback_group=pub_cbg)
 
         self._node.get_logger().info("EvoloMovePath started")
 
     # ─────────────────────────────────────────────────────────────────────────
     def _publish_waraps_feedback(self, payload: dict) -> None:
-        """Publie un dict JSON sur le topic WARAPS exec feedback."""
         try:
             msg = String()
             msg.data = json.dumps(payload)
             self._waraps_feedback_pub.publish(msg)
         except Exception as e:
-            self._node.get_logger().error(f"[WARAPS] Erreur publication feedback : {e}")
+            self._node.get_logger().error(f"[WARAPS] Error publication feedback : {e}")
 
     # ─────────────────────────────────────────────────────────────────────────
     # Geofence callback
@@ -288,8 +283,8 @@ class EvoloMovePath:
                 self._island_polys_raw   = []
                 self._contours_hard      = []
                 self._contours_soft      = []
-                self._contours_allowed_soft = []   # ← ajouter
-                self._contours_allowed_hard = []   # ← ajouter
+                self._contours_allowed_soft = []   
+                self._contours_allowed_hard = []   
 
             # ── Allowed zone ──────────────────────────────────────────────────
             if allowed_polys:
@@ -519,12 +514,12 @@ class EvoloMovePath:
         route = self._dijkstra(graph, 0, 1)
         if not route or len(route) < 2:
             raise MissionAbortError(
-                f'Dijkstra: aucun chemin de contournement trouvé entre '
+                f'Dijkstra: no path found '
                 f'({start_xy[0]:.1f},{start_xy[1]:.1f}) et '
                 f'({end_xy[0]:.1f},{end_xy[1]:.1f})')
 
         self._node.get_logger().info(
-            f'[Dijkstra] Route: {len(route)-1} segment(s)')
+            f'[Dijkstra] Path: {len(route)-1} length')
         return [all_nodes[nid] for nid in route[1:]]
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -582,10 +577,10 @@ class EvoloMovePath:
                 return seg
             raise MissionAbortError(
                 f'Arc Dubins ({s1[0]:.1f},{s1[1]:.1f})→({s2[0]:.1f},{s2[1]:.1f}) '
-                f'traverse un obstacle ou sort de la zone autorisée')
+                f'not possible with geofence')
 
         raise MissionAbortError(
-            f'Aucune solution Dubins valide entre ({s1[0]:.1f},{s1[1]:.1f}) et '
+            f'No solution ({s1[0]:.1f},{s1[1]:.1f}) et '
             f'({s2[0]:.1f},{s2[1]:.1f})')
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -693,7 +688,7 @@ class EvoloMovePath:
             f'{len(wp_ends)} WP end(s) | {n_via} via-pt(s)')
         
 
-        # ── Publication WARAPS de la liste globale des waypoints ──────────────
+        # ── Publication WARAPS ──────────────
         try:
             waypoints_latlon = [
                 {
@@ -708,10 +703,10 @@ class EvoloMovePath:
                 'waypoints': waypoints_latlon,
             })
             self._node.get_logger().info(
-                f"[WARAPS] Liste globale envoyée ({len(waypoints_latlon)} pts)"
+                f"[WARAPS] List sent ({len(waypoints_latlon)} pts)"
             )
         except Exception as e:
-            self._node.get_logger().error(f"[WARAPS] Erreur envoi trajectoire globale : {e}")
+            self._node.get_logger().error(f"[WARAPS] Erreor : {e}")
 
         return True
 
@@ -780,13 +775,6 @@ class EvoloMovePath:
         self._waypoints_filtered    = False
 
     def _filter_waypoints(self):
-        """Filtre les waypoints par rapport au geofence.
-
-        Lève MissionAbortError au premier waypoint invalide (hors stay_inside
-        ou dans un obstacle) plutôt que de le retirer silencieusement de la
-        mission — un waypoint que l'opérateur a explicitement demandé et qui
-        s'avère impossible à atteindre doit annuler la mission, pas être ignoré.
-        """
         with self._islands_lock:
             allowed   = self._allowed_zone
             hard_zone = self._hard_union
@@ -805,7 +793,7 @@ class EvoloMovePath:
                 f'[Filter] allowed_zone bounds={allowed.bounds}')
 
         filtered        = []
-        filtered_latlon = []   # ← on filtre les deux en parallèle
+        filtered_latlon = []   
 
         for i, wp in enumerate(self.target_list):
             wp_pt = SPoint(wp.p.pose.position.x, wp.p.pose.position.y)
@@ -813,12 +801,12 @@ class EvoloMovePath:
             if allowed is not None and not allowed.contains(wp_pt):
                 raise MissionAbortError(
                     f'WP ({wp.p.pose.position.x:.1f}, {wp.p.pose.position.y:.1f}) '
-                    f'en dehors de la zone stay_inside')
+                    f'outside stay_inside')
 
             if hard_zone is not None and hard_zone.contains(wp_pt):
                 raise MissionAbortError(
                     f'WP ({wp.p.pose.position.x:.1f}, {wp.p.pose.position.y:.1f}) '
-                    f'à l\'intérieur d\'un obstacle')
+                    f' inside obstacle')
 
             filtered.append(wp)
             filtered_latlon.append(self.target_list_latlon[i])   # ← sync
@@ -830,7 +818,7 @@ class EvoloMovePath:
             f'[Filter] {len(filtered)}/{len(self.target_list)} waypoint(s) kept')
 
         self.target_list        = filtered
-        self.target_list_latlon = filtered_latlon   # ← mise à jour synchronisée
+        self.target_list_latlon = filtered_latlon   
 
         self._waypoints_for_client = [
             {'x': wp.p.pose.position.x, 'y': wp.p.pose.position.y, 'tol': wp.tol}
@@ -888,7 +876,7 @@ class EvoloMovePath:
         self.path_cursor = max(self.path_cursor, candidate)
         self.path_cursor = min(self.path_cursor, len(path) - 1)
 
-        # ── Publication WARAPS du waypoint courant (Real-time tracking) ───────
+        # ── Publication WARAPS ───────
         if self.wp_end_indices is not None:
             try:
                 wp_current_idx = len(self.wp_end_indices) - 1
@@ -925,7 +913,6 @@ class EvoloMovePath:
 
         v = self.speed_kn
 
-        # control : vise directement le point de lookahead, comme move_to
         lx, ly, _ = self.controller.compute(
             robot_x   = float(robot_pos.x),
             robot_y   = float(robot_pos.y),
@@ -939,7 +926,6 @@ class EvoloMovePath:
         commanded_yaw = math.atan2(ly - robot_pos.y, lx - robot_pos.x)
         q = tf_transformations.quaternion_from_euler(0, 0, commanded_yaw)
 
-        # angular.z reste utile pour la télémétrie / debug, calculé après coup
         yaw_diff = math.atan2(math.sin(commanded_yaw - self.current_yaw),
                                math.cos(commanded_yaw - self.current_yaw))
 
@@ -952,7 +938,7 @@ class EvoloMovePath:
         cmd.pose.pose.orientation.z = q[2]
         cmd.pose.pose.orientation.w = q[3]
         cmd.twist.twist.linear.x    = v
-        cmd.twist.twist.angular.z   = yaw_diff  # indicatif seulement, plus utilisé pour intégrer
+        cmd.twist.twist.angular.z   = yaw_diff  #
         self.speed_pub.publish(cmd)
 
         return None
