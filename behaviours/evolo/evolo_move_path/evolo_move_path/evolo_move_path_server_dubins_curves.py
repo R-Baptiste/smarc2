@@ -14,7 +14,7 @@ from tf2_geometry_msgs import do_transform_pose_stamped
 from tf_transformations import euler_from_quaternion
 from rclpy.time import Duration, Time
 from nav_msgs.msg import Path, Odometry
-from geometry_msgs.msg import TwistStamped, PoseStamped, Quaternion, Point
+from geometry_msgs.msg import TwistStamped, PoseStamped, Quaternion, Point, PointStamped
 from tf2_ros import Buffer, TransformListener
 from smarc_utilities import georef_utils
 import tf_transformations
@@ -186,18 +186,9 @@ class EvoloMovePath:
         self.speed_pub = self._node.create_publisher(Odometry, evoloTopics.EVOLO_CONTROL_PLANNED, 10, callback_group=pub_cbg)
         self.robot_sub    = self._node.create_subscription(Odometry, smarcTopics.ODOM_TOPIC, self.robot_odom_callback, 10, callback_group=sub_cbg)
         self.polygons_sub = self._node.create_subscription(GeofencePolygonsStamped, smarcTopics.GEOFENCE_POLYGONS_TOPIC, self._geofence_polygons_callback, 10, callback_group=sub_cbg)
-        self._waraps_feedback_pub = self._node.create_publisher(String, 'waraps/current_waypoint', 10, callback_group=pub_cbg)
-
+        self.target_pub = self._node.create_publisher(PointStamped, evoloTopics.EVOLO_CURRENT_WP, 10, callback_group=self.publisher_callback_group)
         self._node.get_logger().info("EvoloMovePath started")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    def _publish_waraps_feedback(self, payload: dict) -> None:
-        try:
-            msg = String()
-            msg.data = json.dumps(payload)
-            self._waraps_feedback_pub.publish(msg)
-        except Exception as e:
-            self._node.get_logger().error(f"[WARAPS] Error publication feedback : {e}")
 
     # ─────────────────────────────────────────────────────────────────────────
     # Geofence callback
@@ -706,7 +697,7 @@ class EvoloMovePath:
                 f"[WARAPS] List sent ({len(waypoints_latlon)} pts)"
             )
         except Exception as e:
-            self._node.get_logger().error(f"[WARAPS] Erreor : {e}")
+            self._node.get_logger().error(f"[WARAPS] Error : {e}")
 
         return True
 
