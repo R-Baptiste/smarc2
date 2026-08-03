@@ -86,14 +86,14 @@ class SearchArea(Node):
             namespace='',
             parameters=[
                 ('move_path_action', rclpy.Parameter.Type.STRING),
-                ('lane_spacing',     rclpy.Parameter.Type.DOUBLE),
+                ('spacing',     rclpy.Parameter.Type.DOUBLE),
                 ('waypoint_tol',     rclpy.Parameter.Type.DOUBLE),
                 ('speed',            rclpy.Parameter.Type.DOUBLE),
             ]
         )
 
         self.move_path_action = self.get_parameter('move_path_action').value
-        self.lane_spacing     = self.get_parameter('lane_spacing').value
+        self.spacing     = self.get_parameter('spacing').value
         self.waypoint_tol     = self.get_parameter('waypoint_tol').value
         self.speed            = self.get_parameter('speed').value
 
@@ -171,10 +171,10 @@ class SearchArea(Node):
         self._mp_goal_handle   = None
         self._last_feedback    = {}
 
-        lane_spacing = float(payload.get('lane_spacing', self.lane_spacing)) 
+        spacing = float(payload.get('spacing', self.spacing)) 
 
         inside_latlon = [(p['latitude'], p['longitude']) for p in area_pts]
-        self._waypoints_latlon = self._generate_coverage(inside_latlon, lane_spacing)  
+        self._waypoints_latlon = self._generate_coverage(inside_latlon, spacing)  
 
         if self._waypoints_latlon:
             self.get_logger().info(f'[SearchArea] Generated {len(self._waypoints_latlon)} waypoints')
@@ -273,7 +273,7 @@ class SearchArea(Node):
 
 
     # ─────────────────────────────────────────────────────────────────────────
-    def _generate_coverage(self, inside_latlon, lane_spacing_m):
+    def _generate_coverage(self, inside_latlon, spacing_m):
         origin_lat = sum(p[0] for p in inside_latlon) / len(inside_latlon)
         origin_lon = sum(p[1] for p in inside_latlon) / len(inside_latlon)
 
@@ -292,7 +292,7 @@ class SearchArea(Node):
 
         if self._is_convex(poly):
             self.get_logger().info('Zone is convex — direct sweep')
-            ordered_xy = self._sweep_polygon(poly, lane_spacing_m, sweep_angle)
+            ordered_xy = self._sweep_polygon(poly, spacing_m, sweep_angle)
         else:
             self.get_logger().info('Zone is non-convex — triangular decomposition')
             cells = self._decompose_convex(poly)
@@ -301,7 +301,7 @@ class SearchArea(Node):
             cell_paths, valid_cells = [], []
             for cell in cells:
                 cell_angle = self._longest_edge_angle(list(cell.exterior.coords)[:-1])
-                wps = self._sweep_polygon(cell, lane_spacing_m, cell_angle)
+                wps = self._sweep_polygon(cell, spacing_m, cell_angle)
                 if wps:
                     cell_paths.append(wps)
                     valid_cells.append(cell)
@@ -459,7 +459,7 @@ class SearchArea(Node):
 
 
     # ─────────────────────────────────────────────────────────────────────────
-    def _sweep_polygon(self, poly: Polygon, lane_spacing_m: float,
+    def _sweep_polygon(self, poly: Polygon, spacing_m: float,
                    sweep_angle: float) -> list:
         cos_a = math.cos(-sweep_angle)
         sin_a = math.sin(-sweep_angle)
@@ -474,7 +474,7 @@ class SearchArea(Node):
         reverse = False
         waypoints_rot = []
 
-        while y >= miny - lane_spacing_m * 0.5:
+        while y >= miny - spacing_m * 0.5:
             line  = LineString([(minx - 1.0, y), (maxx + 1.0, y)])
             inter = poly_rot.intersection(line)
 
@@ -501,7 +501,7 @@ class SearchArea(Node):
 
                 reverse = not reverse
 
-            y -= lane_spacing_m
+            y -= spacing_m
 
         return waypoints_rot
 

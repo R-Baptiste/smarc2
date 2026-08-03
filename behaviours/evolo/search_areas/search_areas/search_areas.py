@@ -132,7 +132,7 @@ class SearchAreas(Node):
 
         self._areas = _valid_polygons(payload.get('areas', []))
         self._speed = _parse_speed(self, speed_raw, default=5.0)
-        self._lane_spacing = payload.get('lane_spacing', None) 
+        self._spacing = payload.get('spacing', None) 
 
 
         self._current_area_index = 0
@@ -172,8 +172,8 @@ class SearchAreas(Node):
                 'speed':    self._speed,
                 'area':     area_pts
             }
-            if self._lane_spacing is not None:    
-                zone_payload['lane_spacing'] = self._lane_spacing
+            if self._spacing is not None:    
+                zone_payload['spacing'] = self._spacing
 
             goal_msg           = BaseAction.Goal()
             goal_msg.goal.data = json.dumps(zone_payload)
