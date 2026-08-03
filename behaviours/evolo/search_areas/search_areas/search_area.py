@@ -2,6 +2,15 @@ import rclpy
 import math
 import json
 
+from nav_msgs.msg import Odometry
+from geometry_msgs.msg import PoseStamped
+from geographic_msgs.msg import GeoPoint
+from smarc_msgs.msg import Topics as smarcTopics
+from smarc_utilities import georef_utils
+from tf2_ros import Buffer, TransformListener
+from tf2_geometry_msgs import do_transform_pose_stamped
+from rclpy.time import Time, Duration
+
 from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -9,8 +18,7 @@ from rclpy.action import ActionClient
 from rclpy.action.client import ClientGoalHandle
 
 from smarc_msgs.action import BaseAction
-
-from shapely.geometry import Polygon, LineString
+from shapely.geometry import Polygon, LineString, Point
 from shapely.ops import unary_union, triangulate
 from smarc_action_base.gentler_action_server import GentlerActionServer
 
@@ -114,6 +122,14 @@ class SearchArea(Node):
             loop_frequency=5.0,
         )
 
+        self._tf_buffer   = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self, spin_thread=True)
+        self._robot_pose_raw: PoseStamped | None = None
+
+        self.robot_sub = self.create_subscription(
+            Odometry, smarcTopics.ODOM_TOPIC, self._robot_odom_callback, 10,
+            callback_group=cbg)
+
         self.get_logger().info('SearchArea started')
 
 
@@ -135,6 +151,13 @@ class SearchArea(Node):
             self._mp_goal_handle.cancel_goal_async()
         return True
 
+    # ─────────────────────────────────────────────────────────────────────────
+    def _robot_odom_callback(self, msg: Odometry):
+        ps = PoseStamped()
+        ps.header = msg.header
+        ps.pose   = msg.pose.pose
+        self._robot_pose_raw = ps
+
 
     # ─────────────────────────────────────────────────────────────────────────
     def _prepare_loop(self) -> None:
@@ -148,8 +171,10 @@ class SearchArea(Node):
         self._mp_goal_handle   = None
         self._last_feedback    = {}
 
+        lane_spacing = float(payload.get('lane_spacing', self.lane_spacing)) 
+
         inside_latlon = [(p['latitude'], p['longitude']) for p in area_pts]
-        self._waypoints_latlon = self._generate_coverage(inside_latlon, self.lane_spacing)
+        self._waypoints_latlon = self._generate_coverage(inside_latlon, lane_spacing)  
 
         if self._waypoints_latlon:
             self.get_logger().info(f'[SearchArea] Generated {len(self._waypoints_latlon)} waypoints')
@@ -272,55 +297,161 @@ class SearchArea(Node):
             self.get_logger().info('Zone is non-convex — triangular decomposition')
             cells = self._decompose_convex(poly)
             self.get_logger().info(f'Decomposed into {len(cells)} convex cell(s)')
-            cell_paths = [
-                wps for cell in cells
-                if (wps := self._sweep_polygon(cell, lane_spacing_m, sweep_angle))
-            ]
+
+            cell_paths, valid_cells = [], []
+            for cell in cells:
+                cell_angle = self._longest_edge_angle(list(cell.exterior.coords)[:-1])
+                wps = self._sweep_polygon(cell, lane_spacing_m, cell_angle)
+                if wps:
+                    cell_paths.append(wps)
+                    valid_cells.append(cell)
+
             if not cell_paths:
                 return []
-            ordered_xy = self._chain_paths(cell_paths)
+            ordered_xy = self._chain_paths(valid_cells, cell_paths)
+
+        robot_xy = self._get_robot_xy(origin_lat, origin_lon)
+        if robot_xy is not None and ordered_xy:
+            nearest_idx = min(
+                range(len(ordered_xy)),
+                key=lambda i: math.hypot(ordered_xy[i][0] - robot_xy[0],
+                                        ordered_xy[i][1] - robot_xy[1])
+            )
+            ordered_xy = ordered_xy[nearest_idx:] + list(reversed(ordered_xy[:nearest_idx]))
 
         return [_xy_to_latlon(x, y, origin_lat, origin_lon) for x, y in ordered_xy]
 
 
+    def _get_robot_xy(self, origin_lat, origin_lon):
+        if self._robot_pose_raw is None:
+            return None
+        try:
+            gp = GeoPoint()
+            gp.latitude, gp.longitude, gp.altitude = origin_lat, origin_lon, 0.0
+            utm_ref = georef_utils.convert_latlon_to_utm(gp)
+
+            t = self._tf_buffer.lookup_transform(
+                target_frame=utm_ref.header.frame_id,
+                source_frame=self._robot_pose_raw.header.frame_id,
+                time=Time(seconds=0),
+                timeout=Duration(seconds=1))
+            robot_pose_utm = do_transform_pose_stamped(self._robot_pose_raw, t)
+
+            geo = georef_utils.convert_utm_to_latlon(robot_pose_utm)
+            return _latlon_to_xy(geo.latitude, geo.longitude, origin_lat, origin_lon)
+        except Exception as e:
+            self.get_logger().warn(f'[Coverage] Position of the robot is not available: {e}')
+            return None
+        
+
     # ─────────────────────────────────────────────────────────────────────────
     def _is_convex(self, poly: Polygon) -> bool:
-        hull = poly.convex_hull
-        if hull.area < 1e-9:
-            return True
-        return abs(poly.area - hull.area) / hull.area < 0.01
+        return self._polygon_is_convex(poly)
 
+    # ─────────────────────────────────────────────────────────────────────────
+    def _polygon_is_convex(self, poly: Polygon, tol: float = 1e-7) -> bool:
+        coords = list(poly.exterior.coords)[:-1]
+        n = len(coords)
+        if n < 3:
+            return True
+        sign = 0
+        for i in range(n):
+            a = coords[i]
+            b = coords[(i + 1) % n]
+            c = coords[(i + 2) % n]
+            cross = (b[0]-a[0])*(c[1]-b[1]) - (b[1]-a[1])*(c[0]-b[0])
+            if abs(cross) < tol:
+                continue 
+            s = 1 if cross > 0 else -1
+            if sign == 0:
+                sign = s
+            elif s != sign:
+                return False
+        return True
+
+    def _ear_clip_triangulate(self, ring_coords) -> list:
+        pts = list(ring_coords)
+        if len(pts) >= 2 and pts[0] == pts[-1]:
+            pts = pts[:-1]
+        n = len(pts)
+        if n < 3:
+            return []
+
+        area2 = sum(pts[i][0]*pts[(i+1) % n][1] - pts[(i+1) % n][0]*pts[i][1] for i in range(n))
+        if area2 < 0:
+            pts = pts[::-1]
+
+        def is_convex_vertex(a, b, c):
+            return (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0]) > 1e-12
+
+        def point_in_triangle(p, a, b, c):
+            def sign(p1, p2, p3):
+                return (p1[0]-p3[0])*(p2[1]-p3[1]) - (p2[0]-p3[0])*(p1[1]-p3[1])
+            d1, d2, d3 = sign(p, a, b), sign(p, b, c), sign(p, c, a)
+            neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
+            pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
+            return not (neg and pos)
+
+        indices = list(range(len(pts)))
+        triangles = []
+        guard = 0
+        while len(indices) > 3 and guard < 10000:
+            guard += 1
+            ear_found = False
+            m = len(indices)
+            for k in range(m):
+                i_prev, i_curr, i_next = indices[(k-1) % m], indices[k], indices[(k+1) % m]
+                a, b, c = pts[i_prev], pts[i_curr], pts[i_next]
+                if not is_convex_vertex(a, b, c):
+                    continue
+                if any(point_in_triangle(pts[idx], a, b, c)
+                    for idx in indices if idx not in (i_prev, i_curr, i_next)):
+                    continue
+                triangles.append(Polygon([a, b, c]))
+                indices.pop(k)
+                ear_found = True
+                break
+            if not ear_found:
+                self.get_logger().warn('[EarClip] Stop, weird polygon')
+                break
+
+        if len(indices) == 3:
+            triangles.append(Polygon([pts[i] for i in indices]))
+
+        return triangles
 
     # ─────────────────────────────────────────────────────────────────────────
     def _decompose_convex(self, poly: Polygon) -> list:
-        all_tris = triangulate(poly)
-        tris = [t for t in all_tris if poly.contains(t) or poly.covers(t)]
+        tris = self._ear_clip_triangulate(list(poly.exterior.coords))
         if not tris:
             return [poly]
 
         self.get_logger().info(f'  Triangulated into {len(tris)} triangle(s)')
-        cells  = list(tris)
-        merged = True
 
+        def shares_edge(p1: Polygon, p2: Polygon) -> bool:
+            inter = p1.intersection(p2)
+            return inter.geom_type in ('LineString', 'MultiLineString') and inter.length > 1e-9
+
+        cells = list(tris)
+        merged = True
         while merged:
-            merged    = False
-            used      = [False] * len(cells)
+            merged = False
+            n = len(cells)
+            used = set()
             new_cells = []
-            for i in range(len(cells)):
-                if used[i]:
+            for i in range(n):
+                if i in used:
                     continue
                 current = cells[i]
-                for j in range(i + 1, len(cells)):
-                    if used[j] or not current.touches(cells[j]):
+                for j in range(i + 1, n):
+                    if j in used or not shares_edge(current, cells[j]):
                         continue
                     candidate = unary_union([current, cells[j]])
-                    if (candidate.geom_type == 'Polygon'
-                            and abs(candidate.area - candidate.convex_hull.area)
-                            / (candidate.convex_hull.area + 1e-9) < 0.01):
+                    if candidate.geom_type == 'Polygon' and self._polygon_is_convex(candidate):
                         current = candidate
-                        used[j] = True
-                        merged  = True
-                used[i] = True
+                        used.add(j)
+                        merged = True
+                used.add(i)
                 new_cells.append(current)
             cells = new_cells
 
@@ -329,7 +460,7 @@ class SearchArea(Node):
 
     # ─────────────────────────────────────────────────────────────────────────
     def _sweep_polygon(self, poly: Polygon, lane_spacing_m: float,
-                       sweep_angle: float) -> list:
+                   sweep_angle: float) -> list:
         cos_a = math.cos(-sweep_angle)
         sin_a = math.sin(-sweep_angle)
 
@@ -374,28 +505,50 @@ class SearchArea(Node):
 
         return waypoints_rot
 
-
     # ─────────────────────────────────────────────────────────────────────────
-    def _chain_paths(self, cell_paths: list) -> list:
-        remaining = list(cell_paths)
-        result    = list(remaining.pop(0))
+    def _chain_paths(self, cells: list, cell_paths: list, start_xy=None) -> list:
+        n = len(cells)
 
-        while remaining:
-            last      = result[-1]
-            best_idx  = -1
-            best_dist = float('inf')
-            best_flip = False
+        def shares_edge(p1, p2):
+            inter = p1.intersection(p2)
+            return inter.geom_type in ('LineString', 'MultiLineString') and inter.length > 1e-9
 
-            for i, path in enumerate(remaining):
-                d_s = math.hypot(path[0][0]  - last[0], path[0][1]  - last[1])
-                d_e = math.hypot(path[-1][0] - last[0], path[-1][1] - last[1])
-                if d_s < best_dist:
-                    best_dist, best_idx, best_flip = d_s, i, False
-                if d_e < best_dist:
-                    best_dist, best_idx, best_flip = d_e, i, True
+        adj = {i: set() for i in range(n)}
+        for i in range(n):
+            for j in range(i + 1, n):
+                if shares_edge(cells[i], cells[j]):
+                    adj[i].add(j)
+                    adj[j].add(i)
 
-            chosen = remaining.pop(best_idx)
-            result.extend(reversed(chosen) if best_flip else chosen)
+        if start_xy is not None:
+            start_pt = Point(start_xy)
+            start_idx = min(range(n), key=lambda i: cells[i].centroid.distance(start_pt))
+        else:
+            start_idx = 0
+
+        visited, order, stack = set(), [], [start_idx]
+        while stack:
+            cur = stack.pop()
+            if cur in visited:
+                continue
+            visited.add(cur)
+            order.append(cur)
+            neighbors = sorted(adj[cur] - visited,
+                                key=lambda j: cells[cur].centroid.distance(cells[j].centroid))
+            stack.extend(reversed(neighbors))
+
+        for i in range(n):
+            if i not in visited:
+                order.append(i)
+                visited.add(i)
+
+        result = list(cell_paths[order[0]])
+        for idx in order[1:]:
+            path = cell_paths[idx]
+            last = result[-1]
+            d_s = math.hypot(path[0][0] - last[0], path[0][1] - last[1])
+            d_e = math.hypot(path[-1][0] - last[0], path[-1][1] - last[1])
+            result.extend(reversed(path) if d_e < d_s else path)
 
         return result
 
